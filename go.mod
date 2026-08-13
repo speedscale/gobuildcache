@@ -1,6 +1,6 @@
 module github.com/richardartoul/gobuildcache
 
-go 1.25
+go 1.25.0
 
 require (
 	cloud.google.com/go/storage v1.40.0
@@ -14,6 +14,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.71.1
 	github.com/gofrs/flock v0.13.0
 	github.com/pierrec/lz4/v4 v4.1.23
+	golang.org/x/oauth2 v0.18.0
 	google.golang.org/api v0.170.0
 )
 
@@ -58,7 +59,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.24.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/oauth2 v0.18.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
