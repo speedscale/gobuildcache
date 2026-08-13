@@ -14,20 +14,22 @@ import (
 
 // Global flags
 var (
-	debug        bool
-	printStats   bool
-	backendType  string
-	lockingType  string
-	lockDir      string
-	cacheDir     string
-	s3Bucket     string
-	s3Prefix     string
-	gcsBucket    string
-	gcsPrefix    string
-	errorRate    float64
-	compression  bool
-	asyncBackend bool
-	readOnly     bool
+	debug           bool
+	printStats      bool
+	backendType     string
+	lockingType     string
+	lockDir         string
+	cacheDir        string
+	s3Bucket        string
+	s3Prefix        string
+	gcsBucket       string
+	gcsPrefix       string
+	azblobContainer string
+	azblobPrefix    string
+	errorRate       float64
+	compression     bool
+	asyncBackend    bool
+	readOnly        bool
 )
 
 func main() {
@@ -63,25 +65,27 @@ func runServerCommand() {
 	// Get defaults from environment variables.
 	// All variables support both GOBUILDCACHE_<KEY> and <KEY> forms, with prefixed taking precedence.
 	var (
-		serverFlags         = flag.NewFlagSet("server", flag.ExitOnError)
-		debugDefault        = getEnvBoolWithPrefix("DEBUG", false)
-		printStatsDefault   = getEnvBoolWithPrefix("PRINT_STATS", true)
-		backendDefault      = getEnvWithPrefix("BACKEND_TYPE", getEnv("BACKEND", "disk"))
-		lockTypeDefault     = getEnvWithPrefix("LOCK_TYPE", "fslock")
-		lockDirDefault      = getEnvWithPrefix("LOCK_DIR", filepath.Join(os.TempDir(), "gobuildcache", "locks"))
-		cacheDirDefault     = getEnvWithPrefix("CACHE_DIR", filepath.Join(os.TempDir(), "gobuildcache", "cache"))
-		s3BucketDefault     = getEnvWithPrefix("S3_BUCKET", "")
-		s3PrefixDefault     = getEnvWithPrefix("S3_PREFIX", "gobuildcache/")
-		gcsBucketDefault    = getEnvWithPrefix("GCS_BUCKET", "")
-		gcsPrefixDefault    = getEnvWithPrefix("GCS_PREFIX", "gobuildcache/")
-		errorRateDefault    = getEnvFloatWithPrefix("ERROR_RATE", 0.0)
-		compressionDefault  = getEnvBoolWithPrefix("COMPRESSION", true)
-		asyncBackendDefault = getEnvBoolWithPrefix("ASYNC_BACKEND", true)
-		readOnlyDefault     = getEnvBoolWithPrefix("READ_ONLY", false)
+		serverFlags            = flag.NewFlagSet("server", flag.ExitOnError)
+		debugDefault           = getEnvBoolWithPrefix("DEBUG", false)
+		printStatsDefault      = getEnvBoolWithPrefix("PRINT_STATS", true)
+		backendDefault         = getEnvWithPrefix("BACKEND_TYPE", getEnv("BACKEND", "disk"))
+		lockTypeDefault        = getEnvWithPrefix("LOCK_TYPE", "fslock")
+		lockDirDefault         = getEnvWithPrefix("LOCK_DIR", filepath.Join(os.TempDir(), "gobuildcache", "locks"))
+		cacheDirDefault        = getEnvWithPrefix("CACHE_DIR", filepath.Join(os.TempDir(), "gobuildcache", "cache"))
+		s3BucketDefault        = getEnvWithPrefix("S3_BUCKET", "")
+		s3PrefixDefault        = getEnvWithPrefix("S3_PREFIX", "gobuildcache/")
+		gcsBucketDefault       = getEnvWithPrefix("GCS_BUCKET", "")
+		gcsPrefixDefault       = getEnvWithPrefix("GCS_PREFIX", "gobuildcache/")
+		azblobContainerDefault = getEnvWithPrefix("AZBLOB_CONTAINER", "")
+		azblobPrefixDefault    = getEnvWithPrefix("AZBLOB_PREFIX", "gobuildcache/")
+		errorRateDefault       = getEnvFloatWithPrefix("ERROR_RATE", 0.0)
+		compressionDefault     = getEnvBoolWithPrefix("COMPRESSION", true)
+		asyncBackendDefault    = getEnvBoolWithPrefix("ASYNC_BACKEND", true)
+		readOnlyDefault        = getEnvBoolWithPrefix("READ_ONLY", false)
 	)
 	serverFlags.BoolVar(&debug, "debug", debugDefault, "Enable debug logging to stderr (env: DEBUG)")
 	serverFlags.BoolVar(&printStats, "stats", printStatsDefault, "Print cache statistics on exit (env: PRINT_STATS)")
-	serverFlags.StringVar(&backendType, "backend", backendDefault, "Backend type: disk (local only), s3, gcs (env: BACKEND_TYPE)")
+	serverFlags.StringVar(&backendType, "backend", backendDefault, "Backend type: disk (local only), s3, gcs, azblob (env: BACKEND_TYPE)")
 	serverFlags.StringVar(&lockingType, "lock-type", lockTypeDefault, "Locking type: memory (in-memory), fslock (filesystem) (env: LOCK_TYPE)")
 	serverFlags.StringVar(&lockDir, "lock-dir", lockDirDefault, "Lock directory for fslock (env: LOCK_DIR)")
 	serverFlags.StringVar(&cacheDir, "cache-dir", cacheDirDefault, "Local cache directory (env: CACHE_DIR)")
@@ -89,6 +93,8 @@ func runServerCommand() {
 	serverFlags.StringVar(&s3Prefix, "s3-prefix", s3PrefixDefault, "S3 key prefix (optional) (env: S3_PREFIX)")
 	serverFlags.StringVar(&gcsBucket, "gcs-bucket", gcsBucketDefault, "GCS bucket name (required for gcs backend) (env: GCS_BUCKET)")
 	serverFlags.StringVar(&gcsPrefix, "gcs-prefix", gcsPrefixDefault, "GCS object prefix (optional) (env: GCS_PREFIX)")
+	serverFlags.StringVar(&azblobContainer, "azblob-container", azblobContainerDefault, "Azure container name (required for azblob backend) (env: AZBLOB_CONTAINER)")
+	serverFlags.StringVar(&azblobPrefix, "azblob-prefix", azblobPrefixDefault, "Azure blob prefix (optional) (env: AZBLOB_PREFIX)")
 	serverFlags.Float64Var(&errorRate, "error-rate", errorRateDefault, "Error injection rate (0.0-1.0) for testing error handling (env: ERROR_RATE)")
 	serverFlags.BoolVar(&compression, "compression", compressionDefault, "Enable LZ4 compression for backend storage (env: COMPRESSION)")
 	serverFlags.BoolVar(&asyncBackend, "async-backend", asyncBackendDefault, "Enable async backend writer for non-blocking PUT operations (env: ASYNC_BACKEND)")
@@ -104,7 +110,7 @@ func runServerCommand() {
 		fmt.Fprintf(os.Stderr, "  The prefixed version takes precedence if both are set.\n\n")
 		fmt.Fprintf(os.Stderr, "  DEBUG            Enable debug logging (true/false)\n")
 		fmt.Fprintf(os.Stderr, "  PRINT_STATS      Print cache statistics on exit (true/false)\n")
-		fmt.Fprintf(os.Stderr, "  BACKEND_TYPE     Backend type (disk, s3, gcs)\n")
+		fmt.Fprintf(os.Stderr, "  BACKEND_TYPE     Backend type (disk, s3, gcs, azblob)\n")
 		fmt.Fprintf(os.Stderr, "  LOCK_TYPE        Deduplication type (memory, fslock)\n")
 		fmt.Fprintf(os.Stderr, "  LOCK_DIR         Lock directory for fslock\n")
 		fmt.Fprintf(os.Stderr, "  CACHE_DIR        Local cache directory\n")
@@ -113,6 +119,10 @@ func runServerCommand() {
 		fmt.Fprintf(os.Stderr, "  GCS_BUCKET       GCS bucket name\n")
 		fmt.Fprintf(os.Stderr, "  GCS_PREFIX       GCS object prefix\n")
 		fmt.Fprintf(os.Stderr, "  GCS_ACCESS_TOKEN GCS OAuth2 access token (bypasses ADC)\n")
+		fmt.Fprintf(os.Stderr, "  AZBLOB_CONTAINER  Azure container name\n")
+		fmt.Fprintf(os.Stderr, "  AZBLOB_PREFIX     Azure blob prefix\n")
+		fmt.Fprintf(os.Stderr, "  AZURE_ACCOUNT    Azure storage account name (used with DefaultAzureCredential)\n")
+		fmt.Fprintf(os.Stderr, "  AZURE_STORAGE_CONNECTION_STRING  Azure connection string (takes precedence over AZURE_ACCOUNT)\n")
 		fmt.Fprintf(os.Stderr, "  COMPRESSION      Enable LZ4 compression (true/false)\n")
 		fmt.Fprintf(os.Stderr, "  ASYNC_BACKEND    Enable async backend writer (true/false)\n")
 		fmt.Fprintf(os.Stderr, "  READ_ONLY        Read-only mode: allow reads, skip writes (true/false)\n")
@@ -124,6 +134,8 @@ func runServerCommand() {
 		fmt.Fprintf(os.Stderr, "  %s -backend=s3 -s3-bucket=my-cache-bucket\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # Run with GCS backend using flags:\n")
 		fmt.Fprintf(os.Stderr, "  %s -backend=gcs -gcs-bucket=my-cache-bucket\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  # Run with Azure backend using flags:\n")
+		fmt.Fprintf(os.Stderr, "  %s -backend=azblob -azblob-container=my-cache-container\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # Run with environment variables (prefixed form):\n")
 		fmt.Fprintf(os.Stderr, "  GOBUILDCACHE_BACKEND_TYPE=s3 GOBUILDCACHE_S3_BUCKET=my-cache-bucket %s\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # Run with environment variables (unprefixed form, also supported):\n")
@@ -141,22 +153,26 @@ func runClearCommand() {
 	// Get defaults from environment variables.
 	// All variables support both GOBUILDCACHE_<KEY> and <KEY> forms, with prefixed taking precedence.
 	var (
-		clearFlags      = flag.NewFlagSet("clear", flag.ExitOnError)
-		debugDefault    = getEnvBoolWithPrefix("DEBUG", false)
-		backendDefault  = getEnvWithPrefix("BACKEND_TYPE", getEnv("BACKEND", "disk"))
-		cacheDirDefault = getEnvWithPrefix("CACHE_DIR", filepath.Join(os.TempDir(), "gobuildcache", "cache"))
-		s3BucketDefault = getEnvWithPrefix("S3_BUCKET", "")
-		s3PrefixDefault = getEnvWithPrefix("S3_PREFIX", "")
-		gcsBucketDefault = getEnvWithPrefix("GCS_BUCKET", "")
-		gcsPrefixDefault = getEnvWithPrefix("GCS_PREFIX", "")
+		clearFlags             = flag.NewFlagSet("clear", flag.ExitOnError)
+		debugDefault           = getEnvBoolWithPrefix("DEBUG", false)
+		backendDefault         = getEnvWithPrefix("BACKEND_TYPE", getEnv("BACKEND", "disk"))
+		cacheDirDefault        = getEnvWithPrefix("CACHE_DIR", filepath.Join(os.TempDir(), "gobuildcache", "cache"))
+		s3BucketDefault        = getEnvWithPrefix("S3_BUCKET", "")
+		s3PrefixDefault        = getEnvWithPrefix("S3_PREFIX", "")
+		gcsBucketDefault       = getEnvWithPrefix("GCS_BUCKET", "")
+		gcsPrefixDefault       = getEnvWithPrefix("GCS_PREFIX", "")
+		azblobContainerDefault = getEnvWithPrefix("AZBLOB_CONTAINER", "")
+		azblobPrefixDefault    = getEnvWithPrefix("AZBLOB_PREFIX", "")
 	)
 	clearFlags.BoolVar(&debug, "debug", debugDefault, "Enable debug logging to stderr (env: DEBUG)")
-	clearFlags.StringVar(&backendType, "backend", backendDefault, "Backend type: disk (local only), s3, gcs (env: BACKEND_TYPE)")
+	clearFlags.StringVar(&backendType, "backend", backendDefault, "Backend type: disk (local only), s3, gcs, azblob (env: BACKEND_TYPE)")
 	clearFlags.StringVar(&cacheDir, "cache-dir", cacheDirDefault, "Local cache directory (env: CACHE_DIR)")
 	clearFlags.StringVar(&s3Bucket, "s3-bucket", s3BucketDefault, "S3 bucket name (required for s3 backend) (env: S3_BUCKET)")
 	clearFlags.StringVar(&s3Prefix, "s3-prefix", s3PrefixDefault, "S3 key prefix (optional) (env: S3_PREFIX)")
 	clearFlags.StringVar(&gcsBucket, "gcs-bucket", gcsBucketDefault, "GCS bucket name (required for gcs backend) (env: GCS_BUCKET)")
 	clearFlags.StringVar(&gcsPrefix, "gcs-prefix", gcsPrefixDefault, "GCS object prefix (optional) (env: GCS_PREFIX)")
+	clearFlags.StringVar(&azblobContainer, "azblob-container", azblobContainerDefault, "Azure container name (required for azblob backend) (env: AZBLOB_CONTAINER)")
+	clearFlags.StringVar(&azblobPrefix, "azblob-prefix", azblobPrefixDefault, "Azure blob prefix (optional) (env: AZBLOB_PREFIX)")
 
 	clearFlags.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s clear [flags]\n\n", os.Args[0])
@@ -168,12 +184,14 @@ func runClearCommand() {
 		fmt.Fprintf(os.Stderr, "  The prefixed version takes precedence if both are set.\n\n")
 		fmt.Fprintf(os.Stderr, "  DEBUG          Enable debug logging (true/false)\n")
 		fmt.Fprintf(os.Stderr, "  PRINT_STATS    Print cache statistics on exit (true/false)\n")
-		fmt.Fprintf(os.Stderr, "  BACKEND_TYPE   Backend type (disk, s3, gcs)\n")
+		fmt.Fprintf(os.Stderr, "  BACKEND_TYPE   Backend type (disk, s3, gcs, azblob)\n")
 		fmt.Fprintf(os.Stderr, "  CACHE_DIR      Local cache directory\n")
 		fmt.Fprintf(os.Stderr, "  S3_BUCKET      S3 bucket name\n")
 		fmt.Fprintf(os.Stderr, "  S3_PREFIX      S3 key prefix\n")
 		fmt.Fprintf(os.Stderr, "  GCS_BUCKET     GCS bucket name\n")
 		fmt.Fprintf(os.Stderr, "  GCS_PREFIX     GCS object prefix\n")
+		fmt.Fprintf(os.Stderr, "  AZBLOB_CONTAINER  Azure container name\n")
+		fmt.Fprintf(os.Stderr, "  AZBLOB_PREFIX     Azure blob prefix\n")
 		fmt.Fprintf(os.Stderr, "  S3_TMP_DIR     Local temp directory for S3 backend\n")
 		fmt.Fprintf(os.Stderr, "\nNote: Command-line flags take precedence over environment variables.\n")
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
@@ -183,6 +201,8 @@ func runClearCommand() {
 		fmt.Fprintf(os.Stderr, "  %s clear -backend=s3 -s3-bucket=my-cache-bucket\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # Clear GCS cache using flags:\n")
 		fmt.Fprintf(os.Stderr, "  %s clear -backend=gcs -gcs-bucket=my-cache-bucket\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  # Clear Azure cache using flags:\n")
+		fmt.Fprintf(os.Stderr, "  %s clear -backend=azblob -azblob-container=my-cache-container\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # Clear using environment variables:\n")
 		fmt.Fprintf(os.Stderr, "  GOBUILDCACHE_BACKEND_TYPE=s3 GOBUILDCACHE_S3_BUCKET=my-cache-bucket %s clear\n", os.Args[0])
 	}
@@ -237,20 +257,24 @@ func runClearRemoteCommand() {
 	// Get defaults from environment variables.
 	// All variables support both GOBUILDCACHE_<KEY> and <KEY> forms, with prefixed taking precedence.
 	var (
-		clearRemoteFlags = flag.NewFlagSet("clear-remote", flag.ExitOnError)
-		debugDefault     = getEnvBoolWithPrefix("DEBUG", false)
-		backendDefault   = getEnvWithPrefix("BACKEND_TYPE", getEnv("BACKEND", "disk"))
-		s3BucketDefault  = getEnvWithPrefix("S3_BUCKET", "")
-		s3PrefixDefault  = getEnvWithPrefix("S3_PREFIX", "")
-		gcsBucketDefault = getEnvWithPrefix("GCS_BUCKET", "")
-		gcsPrefixDefault = getEnvWithPrefix("GCS_PREFIX", "")
+		clearRemoteFlags       = flag.NewFlagSet("clear-remote", flag.ExitOnError)
+		debugDefault           = getEnvBoolWithPrefix("DEBUG", false)
+		backendDefault         = getEnvWithPrefix("BACKEND_TYPE", getEnv("BACKEND", "disk"))
+		s3BucketDefault        = getEnvWithPrefix("S3_BUCKET", "")
+		s3PrefixDefault        = getEnvWithPrefix("S3_PREFIX", "")
+		gcsBucketDefault       = getEnvWithPrefix("GCS_BUCKET", "")
+		gcsPrefixDefault       = getEnvWithPrefix("GCS_PREFIX", "")
+		azblobContainerDefault = getEnvWithPrefix("AZBLOB_CONTAINER", "")
+		azblobPrefixDefault    = getEnvWithPrefix("AZBLOB_PREFIX", "")
 	)
 	clearRemoteFlags.BoolVar(&debug, "debug", debugDefault, "Enable debug logging to stderr (env: DEBUG)")
-	clearRemoteFlags.StringVar(&backendType, "backend", backendDefault, "Backend type: disk, s3, gcs (env: BACKEND_TYPE)")
+	clearRemoteFlags.StringVar(&backendType, "backend", backendDefault, "Backend type: disk, s3, gcs, azblob (env: BACKEND_TYPE)")
 	clearRemoteFlags.StringVar(&s3Bucket, "s3-bucket", s3BucketDefault, "S3 bucket name (required for s3 backend) (env: S3_BUCKET)")
 	clearRemoteFlags.StringVar(&s3Prefix, "s3-prefix", s3PrefixDefault, "S3 key prefix (optional) (env: S3_PREFIX)")
 	clearRemoteFlags.StringVar(&gcsBucket, "gcs-bucket", gcsBucketDefault, "GCS bucket name (required for gcs backend) (env: GCS_BUCKET)")
 	clearRemoteFlags.StringVar(&gcsPrefix, "gcs-prefix", gcsPrefixDefault, "GCS object prefix (optional) (env: GCS_PREFIX)")
+	clearRemoteFlags.StringVar(&azblobContainer, "azblob-container", azblobContainerDefault, "Azure container name (required for azblob backend) (env: AZBLOB_CONTAINER)")
+	clearRemoteFlags.StringVar(&azblobPrefix, "azblob-prefix", azblobPrefixDefault, "Azure blob prefix (optional) (env: AZBLOB_PREFIX)")
 
 	clearRemoteFlags.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s clear-remote [flags]\n\n", os.Args[0])
@@ -261,17 +285,21 @@ func runClearRemoteCommand() {
 		fmt.Fprintf(os.Stderr, "  All variables support both GOBUILDCACHE_<KEY> and <KEY> forms.\n")
 		fmt.Fprintf(os.Stderr, "  The prefixed version takes precedence if both are set.\n\n")
 		fmt.Fprintf(os.Stderr, "  DEBUG          Enable debug logging (true/false)\n")
-		fmt.Fprintf(os.Stderr, "  BACKEND_TYPE   Backend type (disk, s3, gcs)\n")
+		fmt.Fprintf(os.Stderr, "  BACKEND_TYPE   Backend type (disk, s3, gcs, azblob)\n")
 		fmt.Fprintf(os.Stderr, "  S3_BUCKET      S3 bucket name\n")
 		fmt.Fprintf(os.Stderr, "  S3_PREFIX      S3 key prefix\n")
 		fmt.Fprintf(os.Stderr, "  GCS_BUCKET     GCS bucket name\n")
 		fmt.Fprintf(os.Stderr, "  GCS_PREFIX     GCS object prefix\n")
+		fmt.Fprintf(os.Stderr, "  AZBLOB_CONTAINER  Azure container name\n")
+		fmt.Fprintf(os.Stderr, "  AZBLOB_PREFIX     Azure blob prefix\n")
 		fmt.Fprintf(os.Stderr, "\nNote: Command-line flags take precedence over environment variables.\n")
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  # Clear S3 cache using flags:\n")
 		fmt.Fprintf(os.Stderr, "  %s clear-remote -backend=s3 -s3-bucket=my-cache-bucket\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # Clear GCS cache using flags:\n")
 		fmt.Fprintf(os.Stderr, "  %s clear-remote -backend=gcs -gcs-bucket=my-cache-bucket\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  # Clear Azure cache using flags:\n")
+		fmt.Fprintf(os.Stderr, "  %s clear-remote -backend=azblob -azblob-container=my-cache-container\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # Clear S3 cache with prefix:\n")
 		fmt.Fprintf(os.Stderr, "  %s clear-remote -backend=s3 -s3-bucket=my-cache-bucket -s3-prefix=myproject/\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # Clear using environment variables:\n")
@@ -411,8 +439,16 @@ func createBackend() (backends.Backend, error) {
 
 		backend, err = backends.NewGCS(gcsBucket, gcsPrefix)
 
+	case "azblob":
+		if azblobContainer == "" {
+			return nil, fmt.Errorf("Azure container is required for azblob backend (set via -azblob-container flag or AZBLOB_CONTAINER env var)")
+		}
+
+		cfg := resolveAzBlobConfig()
+		backend, err = backends.NewAzBlob(azblobContainer, azblobPrefix, cfg)
+
 	default:
-		return nil, fmt.Errorf("unknown backend type: %s (supported: disk, s3, gcs)", backendType)
+		return nil, fmt.Errorf("unknown backend type: %s (supported: disk, s3, gcs, azblob)", backendType)
 	}
 
 	if err != nil {
@@ -473,6 +509,17 @@ func resolveS3Config() (backends.S3Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// resolveAzBlobConfig reads Azure configuration from environment variables using the
+// GOBUILDCACHE_ prefix convention, falling back to standard Azure env vars. If a
+// Precedence follows Microsoft's recommendation: DefaultAzureCredential > SAS token > connection string
+func resolveAzBlobConfig() backends.AzBlobConfig {
+	return backends.AzBlobConfig{
+		Account:          getEnvWithPrefix("AZURE_ACCOUNT", ""),
+		ConnectionString: getEnvWithPrefix("AZURE_STORAGE_CONNECTION_STRING", ""),
+		SASToken:         getEnvWithPrefix("AZURE_SAS_TOKEN", ""),
+	}
 }
 
 func createLockingGroup() (locking.Group, error) {

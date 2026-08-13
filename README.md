@@ -15,6 +15,7 @@
   - [Why should I use gobuildcache?](#why-should-i-use-gobuildcache)
   - [Can I use regular S3?](#can-i-use-regular-s3)
   - [Do I have to use gobuildcache with self-hosted runners in AWS and S3OZ?](#do-i-have-to-use-gobuildcache-with-self-hosted-runners-in-aws-and-s3oz)
+  - [Can I use Azure Blob Storage instead of S3?](#can-i-use-azure-blob-storage-instead-of-s3)
 
 # Overview
 `gobuildcache` implements the [gocacheprog](https://pkg.go.dev/cmd/go/internal/cacheprog) interface defined by the Go compiler over a variety of storage backends, the most important of which is S3 Express One Zone (henceforth referred to as S3OZ). Its primary purpose is to accelerate CI (both compilation and tests) for large Go repositories. You can think of it as a self-hostable and OSS version of [Depot's remote cache feature](https://depot.dev/blog/go-remote-cache).
@@ -149,7 +150,7 @@ gcloud storage buckets update gs://YOUR_BUCKET_NAME \
     --anywhere-cache-ttl=7d
 ```
 
-**Note:** 
+**Note:**
 - Anywhere Cache only accelerates reads. Writes still go directly to the bucket, but since `gobuildcache` performs writes asynchronously, this typically doesn't impact build performance.
 - First-time access to an object will still hit the bucket (cache miss), but subsequent reads will be served from the cache.
 - For best results, ensure your CI runners and cache are in the same zone.
@@ -212,6 +213,76 @@ gcloud projects add-iam-policy-binding PROJECT_ID \
 Or for more granular control, create a custom role with only the required permissions.
 
 ## GitHub Actions Example
+### Using Azure Blob Storage
+
+```bash
+export GOBUILDCACHE_BACKEND_TYPE=azblob
+export GOBUILDCACHE_AZBLOB_CONTAINER=$CONTAINER_NAME
+```
+
+In Azure, a **container** is the equivalent of an S3/GCS bucket. `gobuildcache`
+supports three authentication methods, listed here in the order they are
+preferred — which follows [Microsoft's recommendation](https://learn.microsoft.com/en-us/azure/storage/common/authorize-data-access):
+
+1. **`DefaultAzureCredential`** (**recommended** — managed identity, `az login`,
+   environment credentials, etc.). This is Microsoft's recommended way to
+   authorize blob access. Set `GOBUILDCACHE_AZURE_ACCOUNT` to your storage account name:
+```bash
+az login  # or use a managed identity when running on Azure
+export GOCACHEPROG=gobuildcache
+export GOBUILDCACHE_BACKEND_TYPE=azblob
+export GOBUILDCACHE_AZBLOB_CONTAINER=$CONTAINER_NAME
+export GOBUILDCACHE_AZURE_ACCOUNT=$STORAGE_ACCOUNT_NAME
+go build ./...
+go test ./...
+```
+
+2. **SAS token**. Set `GOBUILDCACHE_AZURE_SAS_TOKEN` together with `GOBUILDCACHE_AZURE_ACCOUNT`:
+```bash
+export GOCACHEPROG=gobuildcache
+export GOBUILDCACHE_BACKEND_TYPE=azblob
+export GOBUILDCACHE_AZBLOB_CONTAINER=$CONTAINER_NAME
+export GOBUILDCACHE_AZURE_ACCOUNT=$STORAGE_ACCOUNT_NAME
+export GOBUILDCACHE_AZURE_SAS_TOKEN="sv=...&ss=b&srt=co&sp=rwdlac&..."
+go build ./...
+go test ./...
+```
+
+3. **Connection string** (convenience fallback, as this embeds an access key). 
+   Set `GOBUILDCACHE_AZURE_STORAGE_CONNECTION_STRING`:
+```bash
+export GOCACHEPROG=gobuildcache
+export GOBUILDCACHE_BACKEND_TYPE=azblob
+export GOBUILDCACHE_AZBLOB_CONTAINER=$CONTAINER_NAME
+export GOBUILDCACHE_AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net"
+go build ./...
+go test ./...
+```
+
+#### Azure Credentials Permissions
+
+When using **`DefaultAzureCredential`** (managed identity, service principal, or
+`az login`), the identity needs a role that allows reading, writing, deleting, and
+listing blobs on the container. The built-in **Storage Blob Data Contributor** role
+covers every operation `gobuildcache` performs (upload cache objects, download cache
+objects, delete objects and list them for clearing). Grant it with the Azure CLI:
+
+```bash
+az role assignment create \
+    --assignee "$PRINCIPAL_ID" \
+    --role "Storage Blob Data Contributor" \
+    --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT"
+```
+
+For more granular control, scope the assignment to the individual container rather than
+the whole storage account.
+
+When authenticating with a **connection string** or a **SAS token**, the credential
+itself carries the necessary data-plane permissions (a connection string via the
+embedded account key; a SAS via the permissions baked into the token — grant it at
+least read, write, delete, and list), so no additional role assignment is required.
+
+## Github Actions Example
 
 See the `examples` directory for examples of how to use `gobuildcache` in a GitHub Actions workflow. 
 
@@ -265,6 +336,31 @@ gsutil lifecycle set - gs://YOUR_BUCKET_NAME
 
 Or using the GCP Console, navigate to your bucket → Lifecycle → Add a rule → Set condition to "Age" of 7 days → Action to "Delete".
 
+### Azure Lifecycle Policy
+
+For Azure Blob Storage, configure a lifecycle management rule that deletes blobs after
+7 days. Using the Azure CLI:
+
+```bash
+az storage account management-policy create \
+    --account-name YOUR_ACCOUNT_NAME \
+    --policy '{
+      "rules": [
+        {
+          "name": "expire-build-cache",
+          "enabled": true,
+          "type": "Lifecycle",
+          "definition": {
+            "filters": {"blobTypes": ["blockBlob"]},
+            "actions": {"baseBlob": {"delete": {"daysAfterModificationGreaterThan": 7}}}
+          }
+        }
+      ]
+    }'
+```
+
+Or in the Azure Portal, navigate to your storage account → Data management → Lifecycle management → Add a rule → Delete blobs 7 days after last modification.
+
 # Preventing Cache Bloat
 
 `gobuildcache` performs zero automatic GC or trimming of the local filesystem cache or the remote cache backend. Therefore, it is recommended that you run your CI on VMs with ephemeral storage and do not persist storage between CI runs. In addition, you should ensure that your remote cache backend has a lifecycle policy configured like the one described in the previous section.
@@ -279,7 +375,7 @@ gobuildcache clear-local
 gobuildcache clear-remote
 ```
 
-The clear commands take the same flags / environment variables as the regular `gobuildcache` tool, so for example you can provide the `cache-dir` flag or `CACHE_DIR` environment variable to the `clear-local` command and the `s3-bucket` flag or `S3_BUCKET` environment variable (or `gcs-bucket`/`GCS_BUCKET` for GCS) to the `clear-remote` command.
+The clear commands take the same flags / environment variables as the regular `gobuildcache` tool, so for example you can provide the `cache-dir` flag or `CACHE_DIR` environment variable to the `clear-local` command and the `s3-bucket` flag or `S3_BUCKET` environment variable (or `gcs-bucket`/`GCS_BUCKET` for GCS, or `azblob-container`/`AZBLOB_CONTAINER` for Azure) to the `clear-remote` command.
 
 # Configuration
 
@@ -289,7 +385,7 @@ All environment variables support both `GOBUILDCACHE_<KEY>` and `<KEY>` forms (e
 
 | Flag | Environment Variable | Default | Description |
 |------|----------------------|---------|-------------|
-| `-backend` | `GOBUILDCACHE_BACKEND_TYPE` | `disk` | Backend type: `disk`, `s3`, or `gcs` |
+| `-backend` | `GOBUILDCACHE_BACKEND_TYPE` | `disk` | Backend type: `disk`, `s3`, `gcs`, or `azblob` |
 | `-lock-type` | `GOBUILDCACHE_LOCK_TYPE` | `fslock` | Locking: `fslock` or `memory` |
 | `-cache-dir` | `GOBUILDCACHE_CACHE_DIR` | `$TMPDIR/gobuildcache/cache` | Local cache directory |
 | `-lock-dir` | `GOBUILDCACHE_LOCK_DIR` | `$TMPDIR/gobuildcache/locks` | Filesystem lock directory |
@@ -298,6 +394,10 @@ All environment variables support both `GOBUILDCACHE_<KEY>` and `<KEY>` forms (e
 | `-gcs-bucket` | `GOBUILDCACHE_GCS_BUCKET` | (none) | GCS bucket name (required for GCS) |
 | `-gcs-prefix` | `GOBUILDCACHE_GCS_PREFIX` | (empty) | GCS object prefix |
 | (env var only) | `GOBUILDCACHE_GCS_ACCESS_TOKEN` | (none) | Explicit GCS OAuth2 access token; bypasses Application Default Credentials |
+| `-azblob-container` | `GOBUILDCACHE_AZBLOB_CONTAINER` | (none) | Azure container name (required for Azure) |
+| `-azblob-prefix` | `GOBUILDCACHE_AZBLOB_PREFIX` | (empty) | Azure blob prefix |
+| (env var only) | `GOBUILDCACHE_AZURE_ACCOUNT` | (none) | Azure storage account name (used with `DefaultAzureCredential`) |
+| (env var only) | `GOBUILDCACHE_AZURE_STORAGE_CONNECTION_STRING` | (none) | Azure connection string (takes precedence over `AZURE_ACCOUNT`) |
 | `-debug` | `GOBUILDCACHE_DEBUG` | `false` | Enable debug logging |
 | `-stats` | `GOBUILDCACHE_PRINT_STATS` | `false` | Print cache statistics on exit |
 | `-read-only` | `GOBUILDCACHE_READ_ONLY` | `false` | Read-only mode: allow cache reads but skip writes |
@@ -321,6 +421,7 @@ graph TB
     GBC -->|3. GET/PUT| Backend{Backend Type}
     Backend --> S3OZ[S3 Express One Zone]
     Backend --> GCS[Google Cloud Storage]
+    Backend --> Azure[Azure Blob Storage]
 ```
 
 ## Processing `GET` commands
@@ -426,14 +527,15 @@ Yes, but the latency of regular S3 is 10-20x higher than S3OZ, which undermines 
 
 ## Do I have to use `gobuildcache` with self-hosted runners in AWS and S3OZ?
 
-No, you can use `gobuildcache` any way you want as long as the `gobuildcache` binary can reach the remote storage backend. For example, you could run it on your laptop and use regular S3, R2, Tigris, or Google Cloud Storage as the remote object storage solution. However, `gobuildcache` works best when the latency of remote backend operations (`GET` and `PUT`) is low, so for best performance we recommend:
+No, you can use `gobuildcache` any way you want as long as the `gobuildcache` binary can reach the remote storage backend. For example, you could run it on your laptop and use regular S3, R2, Tigris, Google Cloud Storage or Azure Blob Storage as the remote object storage solution. However, `gobuildcache` works best when the latency of remote backend operations (`GET` and `PUT`) is low, so for best performance we recommend:
 
 - **AWS**: Self-hosted CI running in AWS targeting a S3OZ bucket in the same region (and ideally same availability zone) as your CI runners
 - **GCP**: Self-hosted CI running in GCP targeting a GCS Regional Standard bucket in the same region as your CI runners. For even better performance, consider enabling [GCS Anywhere Cache](https://cloud.google.com/storage/docs/anywhere-cache) to get zonal read caching.
+- **Azure**: Self-hosted CI running in Azure targeting a Premium Block Blob storage account with LRS in the same region as your CI runners
 
 ## Can I use Google Cloud Storage instead of S3?
 
-Yes! `gobuildcache` supports Google Cloud Storage (GCS) as a backend. GCS is a good alternative to S3, especially if you're already using GCP infrastructure. 
+Yes! `gobuildcache` supports Google Cloud Storage (GCS) as a backend. GCS is a good alternative to S3, especially if you're already using GCP infrastructure.
 
 **Performance Considerations:**
 
@@ -452,3 +554,14 @@ Yes! `gobuildcache` supports Google Cloud Storage (GCS) as a backend. GCS is a g
 - **Write latency**: GCS write latency may be higher than S3OZ, but since `gobuildcache` performs writes asynchronously, this typically doesn't impact build performance significantly.
 
 **Recommendation**: If you're using GCP and want performance closer to S3OZ, use GCS Regional Standard buckets with Anywhere Cache enabled in the same zone as your CI runners. This provides excellent read performance while maintaining better durability than single-AZ storage.
+
+## Can I use Azure Blob Storage instead of S3?
+
+(Also) Yes! `gobuildcache` supports Azure Blob Storage as a backend, which is a good option if your CI runs on Azure infrastructure.
+
+**Performance Considerations:**
+
+- **Premium Block Blob + LRS** (Recommended): Azure's closest analog to S3OZ is a Premium Block Blob storage account (the `BlockBlobStorage` kind) using Locally-Redundant Storage (LRS), in the same region as your CI runners.
+- **Leave hierarchical namespace (ADLS Gen2) and BlobFuse off**: a flat namespace is fine for content-addressed keys, and `gobuildcache` talks to the Blob REST API directly rather than through a FUSE mount.
+
+**Recommendation**: Use a Premium Block Blob account with LRS in the same region as your CI runners, ideally reached over a Private Endpoint.
