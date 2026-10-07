@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"os"
 	"strconv"
 	"time"
@@ -15,6 +16,11 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
+
+// contentTypeOutputIDParam is the Content-Type parameter holding an entry's output ID. A download
+// response returns Content-Type but not custom metadata, so a hit needs no separate metadata
+// request.
+const contentTypeOutputIDParam = "gobuildcache-outputid"
 
 // GCS implements Backend using Google Cloud Storage.
 // This backend only handles GCS operations; local disk caching is handled by server.go.
@@ -75,7 +81,12 @@ func (g *GCS) Put(actionID, outputID []byte, body io.Reader, bodySize int64) err
 	writer := obj.NewWriter(g.ctx)
 	defer writer.Close()
 
-	// Set metadata
+	// Set metadata. The metadata copy of the output ID is for older clients, which only read it
+	// from there.
+	writer.ContentType = mime.FormatMediaType(
+		"application/octet-stream",
+		map[string]string{contentTypeOutputIDParam: hex.EncodeToString(outputID)},
+	)
 	writer.Metadata = map[string]string{
 		"outputid": hex.EncodeToString(outputID),
 		"size":     strconv.FormatInt(bodySize, 10),
@@ -107,9 +118,33 @@ func (g *GCS) Get(actionID []byte) ([]byte, io.ReadCloser, int64, *time.Time, bo
 	key := g.actionIDToKey(actionID)
 	obj := g.bucket.Object(key)
 
-	// Get object attributes first to check if it exists and get metadata
+	// Open the body first: a miss costs the same one request either way, and a hit written by
+	// Put carries the output ID in Content-Type, so the download alone answers it.
+	reader, err := obj.NewReader(g.ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, nil, 0, nil, true, nil
+		}
+		return nil, nil, 0, nil, true, fmt.Errorf("failed to get GCS object reader: %w", err)
+	}
+
+	if _, params, err := mime.ParseMediaType(reader.Attrs.ContentType); err == nil {
+		if outputIDHex, ok := params[contentTypeOutputIDParam]; ok {
+			outputID, err := hex.DecodeString(outputIDHex)
+			if err != nil {
+				reader.Close()
+				return nil, nil, 0, nil, true, nil
+			}
+			putTime := reader.Attrs.LastModified
+			return outputID, reader, reader.Attrs.Size, &putTime, false, nil
+		}
+	}
+
+	// Entries written before the output ID moved into Content-Type only have it in custom
+	// metadata, which the download response does not carry.
 	attrs, err := obj.Attrs(g.ctx)
 	if err != nil {
+		reader.Close()
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, nil, 0, nil, true, nil
 		}
@@ -123,6 +158,7 @@ func (g *GCS) Get(actionID []byte) ([]byte, io.ReadCloser, int64, *time.Time, bo
 
 	outputID, err := hex.DecodeString(outputIDHex)
 	if err != nil {
+		reader.Close()
 		return nil, nil, 0, nil, true, nil
 	}
 
@@ -143,15 +179,6 @@ func (g *GCS) Get(actionID []byte) ([]byte, io.ReadCloser, int64, *time.Time, bo
 	// Fallback to object creation time if metadata is missing
 	if putTime == nil {
 		putTime = &attrs.Created
-	}
-
-	// Get a reader for the object
-	reader, err := obj.NewReader(g.ctx)
-	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotExist) {
-			return nil, nil, 0, nil, true, nil
-		}
-		return nil, nil, 0, nil, true, fmt.Errorf("failed to get GCS object reader: %w", err)
 	}
 
 	// Return the GCS object body as a ReadCloser
